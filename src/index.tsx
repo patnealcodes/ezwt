@@ -23,6 +23,7 @@ type FocusTarget =
   | "repositoryNamespace"
   | "slug"
   | "newBranch"
+  | "createTmuxWindow"
   | "refBranch"
   | "command"
   | "execute";
@@ -38,6 +39,7 @@ const focusOrder: FocusTarget[] = [
   "repositoryNamespace",
   "slug",
   "newBranch",
+  "createTmuxWindow",
   "refBranch",
   "command",
   "execute",
@@ -48,6 +50,7 @@ const fieldColors = {
   repositoryNamespace: "#38bdf8",
   slug: "#c084fc",
   newBranch: "#51cf66",
+  createTmuxWindow: "#2dd4bf",
   refBranch: "#f87171",
 } as const;
 
@@ -99,26 +102,50 @@ function shellEscape(value: string): string {
 }
 
 function worktreePath(worktreesDir: string, repositoryNamespace: string, slug: string): string {
-  const name = `${repositoryNamespace}-${slug}`;
+  const name = `${repositoryNamespace}/${slug}`;
   return worktreesDir === "" ? name : `${worktreesDir.replace(/\/$/, "")}/${name}`;
 }
 
-function commandArgs(input: {
+type CommandInput = {
   worktreesDir: string;
   repositoryNamespace: string;
   slug: string;
   newBranch: boolean;
   refBranch: string;
-}): string[] {
+};
+
+type CommandInvocation = {
+  program: string;
+  args: string[];
+};
+
+function gitCommand(input: CommandInput): CommandInvocation {
   const path = worktreePath(input.worktreesDir, input.repositoryNamespace, input.slug);
   if (input.newBranch) {
-    return ["worktree", "add", "-b", input.slug, path, input.refBranch];
+    return { program: "git", args: ["worktree", "add", "-b", input.slug, path, input.refBranch] };
   }
-  return ["worktree", "add", path, input.refBranch];
+  return { program: "git", args: ["worktree", "add", path, input.refBranch] };
 }
 
-function commandText(input: Parameters<typeof commandArgs>[0]): string {
-  return ["git", ...commandArgs(input)].map(shellEscape).join(" ");
+function tmuxCommand(input: Pick<CommandInput, "worktreesDir" | "repositoryNamespace" | "slug">): CommandInvocation {
+  return {
+    program: "tmux",
+    args: ["new-session", "-ds", `worktree/${input.repositoryNamespace}-${input.slug}`, "-c", worktreePath(input.worktreesDir, input.repositoryNamespace, input.slug)],
+  };
+}
+
+function commandText(command: CommandInvocation): string {
+  return [command.program, ...command.args].map(shellEscape).join(" ");
+}
+
+function displayedCommandText(input: CommandInput & { createTmuxWindow: boolean }): string {
+  const lines = [commandText(gitCommand(input))];
+  if (input.createTmuxWindow) lines.push(commandText(tmuxCommand(input)));
+  return lines.join("\n");
+}
+
+function displayedShellCommand(input: CommandInput & { createTmuxWindow: boolean }): string {
+  return displayedCommandText(input).split("\n").map((line) => `$ ${line}`).join("\n");
 }
 
 type CommandColorRange = {
@@ -136,7 +163,7 @@ function addRange(ranges: CommandColorRange[], command: string, value: string, f
   return end;
 }
 
-function commandColorRanges(input: Parameters<typeof commandArgs>[0], command: string): CommandColorRange[] {
+function commandColorRanges(input: CommandInput, command: string): CommandColorRange[] {
   const ranges: CommandColorRange[] = [];
   let cursor = 0;
 
@@ -156,6 +183,23 @@ function commandColorRanges(input: Parameters<typeof commandArgs>[0], command: s
   }
 
   addRange(ranges, command, shellEscape(input.refBranch), fieldRgba.refBranch, cursor);
+  return ranges.sort((first, second) => first.start - second.start);
+}
+
+function tmuxCommandColorRanges(input: CommandInput, command: string): CommandColorRange[] {
+  const ranges = commandColorRanges(input, command);
+  const path = shellEscape(worktreePath(input.worktreesDir, input.repositoryNamespace, input.slug));
+  const firstPathEnd = command.indexOf(path) + path.length;
+  const secondPathStart = command.indexOf(path, firstPathEnd);
+
+  if (secondPathStart !== -1) {
+    const normalizedWorktreesDir = input.worktreesDir.replace(/\/$/, "");
+    let pathCursor = secondPathStart;
+    pathCursor = addRange(ranges, command, normalizedWorktreesDir, fieldRgba.worktreesDir, pathCursor);
+    pathCursor = addRange(ranges, command, input.repositoryNamespace, fieldRgba.repositoryNamespace, pathCursor);
+    addRange(ranges, command, input.slug, fieldRgba.slug, pathCursor);
+  }
+
   return ranges.sort((first, second) => first.start - second.start);
 }
 
@@ -182,7 +226,7 @@ function colorCommandChunks(command: string, ranges: CommandColorRange[]): TextC
   return chunks;
 }
 
-function isComplete(input: Parameters<typeof commandArgs>[0]): boolean {
+function isComplete(input: CommandInput): boolean {
   return (
     input.worktreesDir.trim() !== "" &&
     input.repositoryNamespace.trim() !== "" &&
@@ -240,15 +284,16 @@ function App({ config, initialStatus }: { config: ParsedAppConfig; initialStatus
   const [repositoryNamespace, setRepositoryNamespace] = useState(basename(process.cwd()));
   const [slug, setSlug] = useState("");
   const [newBranch, setNewBranch] = useState(true);
+  const [createTmuxWindow, setCreateTmuxWindow] = useState(false);
   const [refBranch, setRefBranch] = useState("main");
   const [focus, setFocus] = useState<FocusTarget>(() => config.worktreesDir.trim() === "" ? "worktreesDir" : "slug");
   const [status, setStatus] = useState<Status>(initialStatus);
   const [isRunning, setIsRunning] = useState(false);
 
   const input = { worktreesDir, repositoryNamespace, slug, newBranch, refBranch };
-  const command = commandText(input);
-  const displayedCommand = `$ ${command}`;
-  const commandRanges = commandColorRanges(input, displayedCommand);
+  const command = displayedCommandText({ ...input, createTmuxWindow });
+  const displayedCommand = displayedShellCommand({ ...input, createTmuxWindow });
+  const commandRanges = createTmuxWindow ? tmuxCommandColorRanges(input, displayedCommand) : commandColorRanges(input, displayedCommand);
   const complete = isComplete(input);
   const compact = height < 34;
 
@@ -262,7 +307,8 @@ function App({ config, initialStatus }: { config: ParsedAppConfig; initialStatus
     setStatus({ type: "info", message: "Creating worktree..." });
 
     try {
-      const proc = Bun.spawn(["git", ...commandArgs(input)], {
+      const worktreeCommand = gitCommand(input);
+      const proc = Bun.spawn([worktreeCommand.program, ...worktreeCommand.args], {
         cwd: process.cwd(),
         stdout: "pipe",
         stderr: "pipe",
@@ -274,7 +320,25 @@ function App({ config, initialStatus }: { config: ParsedAppConfig; initialStatus
       ]);
 
       if (exitCode === 0) {
-        setStatus({ type: "success", message: stdout.trim() || "Worktree created." });
+        if (createTmuxWindow) {
+          const sessionCommand = tmuxCommand(input);
+          const tmuxProc = Bun.spawn([sessionCommand.program, ...sessionCommand.args], {
+            cwd: process.cwd(),
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const [tmuxExitCode, tmuxStderr] = await Promise.all([
+            tmuxProc.exited,
+            new Response(tmuxProc.stderr).text(),
+          ]);
+
+          if (tmuxExitCode !== 0) {
+            setStatus({ type: "error", message: tmuxStderr.trim() || `Worktree created, but tmux exited with code ${tmuxExitCode}.` });
+            return;
+          }
+        }
+
+        setStatus({ type: "success", message: stdout.trim() || (createTmuxWindow ? "Worktree and tmux window created." : "Worktree created.") });
       } else {
         setStatus({ type: "error", message: stderr.trim() || `git exited with code ${exitCode}.` });
       }
@@ -313,6 +377,16 @@ function App({ config, initialStatus }: { config: ParsedAppConfig; initialStatus
       return;
     }
 
+    if (key.name === "down") {
+      moveFocus(1);
+      return;
+    }
+
+    if (key.name === "up") {
+      moveFocus(1);
+      return;
+    }
+
     if (key.name === "return" && key.ctrl) {
       void execute();
       return;
@@ -320,6 +394,11 @@ function App({ config, initialStatus }: { config: ParsedAppConfig; initialStatus
 
     if (focus === "newBranch" && (key.name === "space" || key.name === "return")) {
       setNewBranch((value) => !value);
+      return;
+    }
+
+    if (focus === "createTmuxWindow" && (key.name === "space" || key.name === "return")) {
+      setCreateTmuxWindow((value) => !value);
       return;
     }
 
@@ -369,6 +448,14 @@ function App({ config, initialStatus }: { config: ParsedAppConfig; initialStatus
         </box>
       </FocusRow>
 
+      <FocusRow active={focus === "createTmuxWindow"}>
+        <box focused={focus === "createTmuxWindow"} height={1}>
+          <text fg={fieldColors.createTmuxWindow}>
+            {createTmuxWindow ? "[x]" : "[ ]"} Create a new tmux window
+          </text>
+        </box>
+      </FocusRow>
+
       <FieldRow active={focus === "refBranch"} compact={compact} label="Ref branch" labelColor={fieldColors.refBranch}>
         <box border focused={focus === "refBranch"} height={3}>
           <input value={refBranch} focused={focus === "refBranch"} onInput={setRefBranch} />
@@ -378,7 +465,7 @@ function App({ config, initialStatus }: { config: ParsedAppConfig; initialStatus
       <FocusRow active={focus === "command"}>
         <box flexDirection="column" gap={0}>
           <text fg={focus === "command" ? "#93c5fd" : "#9ca3af"}>Command (press c to copy)</text>
-          <box focused={focus === "command"} minHeight={compact ? 3 : 5} flexDirection="row" backgroundColor="#141521">
+          <box focused={focus === "command"} minHeight={compact ? 4 : 5} flexDirection="row" backgroundColor="#141521">
             <box width={1} backgroundColor="#050712" />
             <box flexGrow={1} padding={1} backgroundColor="#141521">
               <code
