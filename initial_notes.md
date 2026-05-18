@@ -1,4 +1,4 @@
-Draft Workflow
+# Draft Workflow
 Use a flat global root:
 ~/repos/repository-name                         # primary clone
 ~/worktrees/repository-name_JIRA-1234-header-nav # worktree
