@@ -10,12 +10,14 @@ import { useState } from "react";
 type RawAppConfig = {
   config?: {
     worktree_dir?: string,
+    tmux_session_on_create?: boolean,
     theme?: string
   };
 };
 
 type ParsedAppConfig = {
   worktreesDir: string;
+  tmuxSessionOnCreate: boolean;
 };
 
 type FocusTarget =
@@ -73,7 +75,8 @@ function parseConfigToml(contents: string): ParsedAppConfig {
   const parsed: RawAppConfig = Bun.TOML.parse(contents) ?? {};
 
   return {
-    worktreesDir: parsed?.config?.['worktree_dir'] ?? ""
+    worktreesDir: parsed?.config?.['worktree_dir'] ?? "",
+    tmuxSessionOnCreate: parsed?.config?.['tmux_session_on_create'] ?? false
   }
 }
 
@@ -85,12 +88,12 @@ async function loadConfig(): Promise<{ config: ParsedAppConfig; error?: string }
     return { config: parseConfigToml(contents) };
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return { config: { worktreesDir: "" } };
+      return { config: { worktreesDir: "", tmuxSessionOnCreate: false } };
     }
 
     const message = error instanceof Error ? error.message : String(error);
     return {
-      config: { worktreesDir: "" },
+      config: { worktreesDir: "", tmuxSessionOnCreate: false },
       error: `Could not read ${configPath}: ${message}`,
     };
   }
@@ -101,9 +104,21 @@ function shellEscape(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+function normalizedWorktreesDir(worktreesDir: string): string {
+  const home = homedir();
+  if (worktreesDir === "~") return home;
+  if (worktreesDir.startsWith("~/")) return `${home}/${worktreesDir.slice(2)}`.replace(/\/$/, "");
+  if (worktreesDir === "$HOME") return home;
+  if (worktreesDir.startsWith("$HOME/")) return `${home}/${worktreesDir.slice(6)}`.replace(/\/$/, "");
+  if (worktreesDir === "${HOME}") return home;
+  if (worktreesDir.startsWith("${HOME}/")) return `${home}/${worktreesDir.slice(8)}`.replace(/\/$/, "");
+  return worktreesDir.replace(/\/$/, "");
+}
+
 function worktreePath(worktreesDir: string, repositoryNamespace: string, slug: string): string {
   const name = `${repositoryNamespace}/${slug}`;
-  return worktreesDir === "" ? name : `${worktreesDir.replace(/\/$/, "")}/${name}`;
+  const dir = normalizedWorktreesDir(worktreesDir);
+  return dir === "" ? name : `${dir}/${name}`;
 }
 
 type CommandInput = {
@@ -174,9 +189,9 @@ function commandColorRanges(input: CommandInput, command: string): CommandColorR
   const path = shellEscape(worktreePath(input.worktreesDir, input.repositoryNamespace, input.slug));
   const pathStart = command.indexOf(path, cursor);
   if (pathStart !== -1) {
-    const normalizedWorktreesDir = input.worktreesDir.replace(/\/$/, "");
+    const worktreesDir = normalizedWorktreesDir(input.worktreesDir);
     let pathCursor = pathStart;
-    pathCursor = addRange(ranges, command, normalizedWorktreesDir, fieldRgba.worktreesDir, pathCursor);
+    pathCursor = addRange(ranges, command, worktreesDir, fieldRgba.worktreesDir, pathCursor);
     pathCursor = addRange(ranges, command, input.repositoryNamespace, fieldRgba.repositoryNamespace, pathCursor);
     addRange(ranges, command, input.slug, fieldRgba.slug, pathCursor);
     cursor = pathStart + path.length;
@@ -193,9 +208,9 @@ function tmuxCommandColorRanges(input: CommandInput, command: string): CommandCo
   const secondPathStart = command.indexOf(path, firstPathEnd);
 
   if (secondPathStart !== -1) {
-    const normalizedWorktreesDir = input.worktreesDir.replace(/\/$/, "");
+    const worktreesDir = normalizedWorktreesDir(input.worktreesDir);
     let pathCursor = secondPathStart;
-    pathCursor = addRange(ranges, command, normalizedWorktreesDir, fieldRgba.worktreesDir, pathCursor);
+    pathCursor = addRange(ranges, command, worktreesDir, fieldRgba.worktreesDir, pathCursor);
     pathCursor = addRange(ranges, command, input.repositoryNamespace, fieldRgba.repositoryNamespace, pathCursor);
     addRange(ranges, command, input.slug, fieldRgba.slug, pathCursor);
   }
@@ -284,7 +299,7 @@ function App({ config, initialStatus }: { config: ParsedAppConfig; initialStatus
   const [repositoryNamespace, setRepositoryNamespace] = useState(basename(process.cwd()));
   const [slug, setSlug] = useState("");
   const [newBranch, setNewBranch] = useState(true);
-  const [createTmuxWindow, setCreateTmuxWindow] = useState(false);
+  const [createTmuxWindow, setCreateTmuxWindow] = useState(config.tmuxSessionOnCreate);
   const [refBranch, setRefBranch] = useState("main");
   const [focus, setFocus] = useState<FocusTarget>(() => config.worktreesDir.trim() === "" ? "worktreesDir" : "slug");
   const [status, setStatus] = useState<Status>(initialStatus);
@@ -383,7 +398,7 @@ function App({ config, initialStatus }: { config: ParsedAppConfig; initialStatus
     }
 
     if (key.name === "up") {
-      moveFocus(1);
+      moveFocus(-1);
       return;
     }
 
